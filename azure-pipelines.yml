@@ -1,0 +1,120 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  group: Unity_WebGL_AWS   # <--- tên Variable Group bạn tạo
+  UNITY_VERSION: '6000.0.32f1'
+  BUILD_TARGET: 'WebGL'
+  BUILD_PATH: 'build/WebGLBuild'
+  ARTIFACT_NAME: 'webgl-build'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Build
+  displayName: Build Unity WebGL
+  jobs:
+  - job: UnityBuild
+    displayName: Unity Build
+    steps:
+    - checkout: self
+
+    - task: Cache@2
+      inputs:
+        key: 'unity | $(Agent.OS) | $(Build.SourcesDirectory)/Packages/manifest.json'
+        path: 'Library'
+
+    - script: |
+        echo "Starting Unity build with docker image..."
+        docker run --rm \
+          -v $(Build.SourcesDirectory):/project \
+          -w /project \
+          -e UNITY_LICENSE="$(UNITY_LICENSE)" \
+          unityci/editor:ubuntu-$(UNITY_VERSION)-webgl-3.1.0 \
+          /opt/unity/Editor/Unity \
+          -batchmode -nographics -quit \
+          -projectPath /project \
+          -buildTarget $(BUILD_TARGET) \
+          -executeMethod BuildScript.CIWebGL \
+          -logFile -
+      displayName: Build with Unity (docker)
+
+    - publish: $(BUILD_PATH)
+      artifact: $(ARTIFACT_NAME)
+
+- stage: Deploy
+  displayName: Deploy to S3 + CloudFront
+  dependsOn: Build
+  jobs:
+  - job: Upload
+    displayName: Upload to S3
+    steps:
+    - download: current
+      artifact: $(ARTIFACT_NAME)
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.x'
+      displayName: Use Python
+
+    - script: |
+        pip install --upgrade awscli
+      displayName: Install AWS CLI
+
+    - script: |
+        # Normalize prefix (remove leading slash if present)
+        PREFIX="$(echo '$(S3_PREFIX)' | sed 's|^/||')"
+        if [ -z "$PREFIX" ]; then
+          BUCKET="s3://$(S3_BUCKET)"
+          CLOUDFRONT_PATH_PREFIX=""
+        else
+          BUCKET="s3://$(S3_BUCKET)/$PREFIX"
+          CLOUDFRONT_PATH_PREFIX="/$PREFIX"
+        fi
+        echo "Uploading to $BUCKET"
+
+        aws configure set aws_access_key_id $(AWS_ACCESS_KEY_ID)
+        aws configure set aws_secret_access_key $(AWS_SECRET_ACCESS_KEY)
+        aws configure set region $(AWS_REGION)
+
+        # 1) Sync hashed/static files (immutable) — exclude common entry points
+        aws s3 sync $(Pipeline.Workspace)/$(ARTIFACT_NAME) "$BUCKET" --delete \
+          --exclude "index.html" \
+          --exclude "Build/*.loader.js" \
+          --exclude "Build/*.framework.js" \
+          --cache-control "public,max-age=31536000,immutable"
+
+        # 2) Upload entry points with short cache and set content-type explicitly
+        aws s3 cp $(Pipeline.Workspace)/$(ARTIFACT_NAME)/index.html "$BUCKET/index.html" \
+          --cache-control "public,max-age=60" --content-type "text/html"
+
+        # Upload loader/framework JS with short cache
+        # (this copies any .loader.js and .framework.js under Build/)
+        find $(Pipeline.Workspace)/$(ARTIFACT_NAME)/Build -type f -name "*.loader.js" -o -name "*.framework.js" | while read f; do
+          relpath="${f#$(Pipeline.Workspace)/$(ARTIFACT_NAME)/}"
+          aws s3 cp "$f" "$BUCKET/$relpath" --cache-control "public,max-age=60" --content-type "application/javascript"
+        done
+
+        # 3) (Optional) If you precompressed with gzip/br and want to serve compressed:
+        # Example: upload file.js.br as file.js with content-encoding br
+        # aws s3 cp file.js.br s3://.../file.js --content-encoding br --content-type application/javascript --cache-control "public,max-age=31536000,immutable"
+
+        # 4) Create CloudFront invalidation for entry points
+        aws cloudfront create-invalidation --distribution-id $(CLOUDFRONT_DISTRIBUTION_ID) --paths "/index.html" "/Build/*" || true
+
+        # 5) Save live URL to artifact and pipeline variable
+        LIVE_URL="https://$(CLOUDFRONT_DOMAIN)${CLOUDFRONT_PATH_PREFIX}/index.html"
+        echo "LIVE_URL=$LIVE_URL" > $(Build.ArtifactStagingDirectory)/live_url.txt
+        echo "##vso[task.setvariable variable=LIVE_URL]$LIVE_URL"
+        echo "Your WebGL build is live at: $LIVE_URL"
+      displayName: Upload to S3 and Invalidate CloudFront
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'deploy-info'
+        publishLocation: 'Container'
+      displayName: Publish deploy-info artifact
