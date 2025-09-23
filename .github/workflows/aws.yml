@@ -1,0 +1,118 @@
+name: Build & Deploy Unity WebGL
+
+on:
+  push:
+    branches:
+      - main   # hoặc master nếu repo bạn đang dùng master
+
+jobs:
+  build:
+    name: Build Unity WebGL
+    runs-on: ubuntu-latest
+
+    env:
+      UNITY_VERSION: 6000.0.32f1
+      BUILD_TARGET: WebGL
+      BUILD_PATH: build/WebGLBuild
+      ARTIFACT_NAME: webgl-build
+      UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache Unity Library
+        uses: actions/cache@v3
+        with:
+          path: Library
+          key: unity-${{ runner.os }}-${{ hashFiles('**/Packages/manifest.json') }}
+
+      - name: Build with Unity (docker)
+        run: |
+          echo "Starting Unity build with docker image..."
+          docker run --rm \
+            -v ${{ github.workspace }}:/project \
+            -w /project \
+            -e UNITY_LICENSE="${{ secrets.UNITY_LICENSE }}" \
+            unityci/editor:ubuntu-${{ env.UNITY_VERSION }}-webgl-3.1.0 \
+            /opt/unity/Editor/Unity \
+            -batchmode -nographics -quit \
+            -projectPath /project \
+            -buildTarget ${{ env.BUILD_TARGET }} \
+            -executeMethod BuildScript.CIWebGL \
+            -logFile -
+
+      - name: Upload WebGL Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.BUILD_PATH }}
+
+  deploy:
+    name: Deploy to S3 + CloudFront
+    needs: build
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      S3_PREFIX: ${{ secrets.S3_PREFIX }}
+      CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+      CLOUDFRONT_DOMAIN: ${{ secrets.CLOUDFRONT_DOMAIN }}
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: webgl-build
+          path: webgl-build
+
+      - name: Install AWS CLI
+        run: pip install --upgrade awscli
+
+      - name: Upload to S3 and Invalidate CloudFront
+        run: |
+          # Normalize prefix (remove leading slash if present)
+          PREFIX="$(echo '${{ env.S3_PREFIX }}' | sed 's|^/||')"
+          if [ -z "$PREFIX" ]; then
+            BUCKET="s3://${{ env.S3_BUCKET }}"
+            CLOUDFRONT_PATH_PREFIX=""
+          else
+            BUCKET="s3://${{ env.S3_BUCKET }}/$PREFIX"
+            CLOUDFRONT_PATH_PREFIX="/$PREFIX"
+          fi
+          echo "Uploading to $BUCKET"
+
+          # 1) Sync static files
+          aws s3 sync webgl-build "$BUCKET" --delete \
+            --exclude "index.html" \
+            --exclude "Build/*.loader.js" \
+            --exclude "Build/*.framework.js" \
+            --cache-control "public,max-age=31536000,immutable"
+
+          # 2) Upload index.html with short cache
+          aws s3 cp webgl-build/index.html "$BUCKET/index.html" \
+            --cache-control "public,max-age=60" --content-type "text/html"
+
+          # Upload loader/framework JS with short cache
+          find webgl-build/Build -type f \( -name "*.loader.js" -o -name "*.framework.js" \) | while read f; do
+            relpath="${f#webgl-build/}"
+            aws s3 cp "$f" "$BUCKET/$relpath" --cache-control "public,max-age=60" --content-type "application/javascript"
+          done
+
+          # 3) Invalidate CloudFront cache
+          aws cloudfront create-invalidation --distribution-id ${{ env.CLOUDFRONT_DISTRIBUTION_ID }} --paths "/index.html" "/Build/*" || true
+
+          # 4) Save live URL
+          mkdir -p deploy-info
+          LIVE_URL="https://${{ env.CLOUDFRONT_DOMAIN }}${CLOUDFRONT_PATH_PREFIX}/index.html"
+          echo "$LIVE_URL" > deploy-info/live_url.txt
+          echo "Your WebGL build is live at: $LIVE_URL"
+
+      - name: Upload deploy-info
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-info
+          path: deploy-info/live_url.txt
