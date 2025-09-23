@@ -1,7 +1,7 @@
 trigger:
   branches:
     include:
-      - main
+      - master
 
 variables:
   group: Unity_WebGL_AWS   # <--- tên Variable Group bạn tạo
