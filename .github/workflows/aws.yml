@@ -3,19 +3,12 @@ name: Build & Deploy Unity WebGL
 on:
   push:
     branches:
-      - master   # hoặc master nếu repo bạn đang dùng master
+      - master   # hoặc main nếu repo bạn dùng main
 
 jobs:
   build:
     name: Build Unity WebGL
     runs-on: ubuntu-latest
-
-    env:
-      UNITY_VERSION: 6000.0.32f1
-      BUILD_TARGET: WebGL
-      BUILD_PATH: build/WebGLBuild
-      ARTIFACT_NAME: webgl-build
-      UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
 
     steps:
       - name: Checkout repository
@@ -25,28 +18,21 @@ jobs:
         uses: actions/cache@v3
         with:
           path: Library
-          key: unity-${{ runner.os }}-${{ hashFiles('**/Packages/manifest.json') }}
+          key: Library-${{ runner.os }}-${{ hashFiles('**/Packages/manifest.json') }}
 
-      - name: Build with Unity (docker)
-        run: |
-          echo "Starting Unity build with docker image..."
-          docker run --rm \
-            -v ${{ github.workspace }}:/project \
-            -w /project \
-            -e UNITY_LICENSE="${{ secrets.UNITY_LICENSE }}" \
-            unityci/editor:ubuntu-${{ env.UNITY_VERSION }}-webgl-3.1.0 \
-            /opt/unity/Editor/Unity \
-            -batchmode -nographics -quit \
-            -projectPath /project \
-            -buildTarget ${{ env.BUILD_TARGET }} \
-            -executeMethod BuildScript.CIWebGL \
-            -logFile -
+      - name: Build project with Unity
+        uses: game-ci/unity-builder@v4
+        with:
+          unityVersion: 6000.0.32f1
+          targetPlatform: WebGL
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
 
       - name: Upload WebGL Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.BUILD_PATH }}
+          name: webgl-build
+          path: build/WebGL
 
   deploy:
     name: Deploy to S3 + CloudFront
@@ -85,7 +71,7 @@ jobs:
           fi
           echo "Uploading to $BUCKET"
 
-          # 1) Sync static files
+          # 1) Sync static files (long cache)
           aws s3 sync webgl-build "$BUCKET" --delete \
             --exclude "index.html" \
             --exclude "Build/*.loader.js" \
