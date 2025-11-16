@@ -125,8 +125,8 @@ public static class Voices
         str = Regex.Replace(str, "[ỳýỵỷỹ]", "y");
         str = Regex.Replace(str, "đ", "d");
         str = Regex.Replace(str, " ", "");
-        str = str.Replace(",", "");
-        str = str.Replace(".", "");
+        str = str.Replace(",", "-");
+        str = str.Replace(".", "-");
         return str;
     }
 }

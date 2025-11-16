@@ -11,12 +11,14 @@ EditorBuildSettings:
   - enabled: 0
     path: Assets/DevDen Arch Viz Scotland/Scenes/ArchViz1.unity
     guid: 5d9a04077777e2741aa75a554f7ee3fb
-  - enabled: 1
+  - enabled: 0
     path: Assets/Scenes/MainMenuScene.unity
     guid: de1bb0c503000294e903d9f00827d037
   - enabled: 1
     path: Assets/Scenes/ArchViz.unity
     guid: 451099b4cd4d97442951386b1bc2393a
   m_configObjects:
+    Unity.XR.Oculus.Settings: {fileID: 11400000, guid: b341a1009a8b14f82a5d03a520fbc93f, type: 2}
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
+    com.unity.xr.management.loader_settings: {fileID: 11400000, guid: cd09028a9279b40e18dff6975463a0d3, type: 2}
   m_UseUCBPForAssetBundles: 0

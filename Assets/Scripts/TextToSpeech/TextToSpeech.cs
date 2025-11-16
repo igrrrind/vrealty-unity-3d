@@ -1,7 +1,9 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -12,6 +14,9 @@ public class TextToSpeech : MonoBehaviour
 
     private string key;
     private string token;
+    private bool hasPlayed = false;
+    private static int concurrentRequests = 0;
+    private static int maxConcurrentRequests = 2;
 
     [TextArea]
     public string transcript;
@@ -22,36 +27,82 @@ public class TextToSpeech : MonoBehaviour
     [Header("Text")]
     private AudioSource audioSource;
     #endregion
+
+    // Global queue for playback requests across all instances
+    private class PlayRequest { public string filePath; public Transform origin; }
+    private static Queue<PlayRequest> playQueue = new Queue<PlayRequest>();
+    private static bool queueProcessorRunning = false;
+
     void Start()
     {
         audioSource = GetComponent<AudioSource>();
-        // key = $"{Voices.GetInitials(transcript)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.mp3";
-        // if (File.Exists(Path.Combine(Application.persistentDataPath, key)))
-        // {
-        //     Debug.Log("Audio file already exists locally. Loading from file.");
-        //     Debug.Log("File path: " + Path.Combine(Application.persistentDataPath, key));
-        //     StartCoroutine(PlayLocalAudioClip(Path.Combine(Application.persistentDataPath, key)));
-        // }
-        // else
-        //     StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
+        StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
     }
-    private void OnTriggerEnter(Collider other) 
+    // kích hoạt khi player chạm vào vùng trigger, khi kích hoạt, ktra xem file đã có chưa, nếu có thì play luôn, nếu chưa thì tạo mới
+    private void OnTriggerEnter(Collider other)
     {
-       
-        Debug.Log("Collision detected with: " + other.gameObject.name);
+        if (hasPlayed) return;
         if (other.gameObject.CompareTag("Player"))
         {
-            key = $"{Voices.GetInitials(transcript)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.mp3";
-            if (File.Exists(Path.Combine(Application.persistentDataPath, key)))
+            key = $"{Voices.GetInitials(transcript)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.wav";
+            string localPath = Path.Combine(Application.persistentDataPath, key);
+            if (File.Exists(localPath))
             {
-                Debug.Log("Audio file already exists locally. Loading from file.");
-                Debug.Log("File path: " + Path.Combine(Application.persistentDataPath, key));
-                StartCoroutine(PlayLocalAudioClip(Path.Combine(Application.persistentDataPath, key)));
+                EnqueuePlayback(localPath, this.transform);
             }
             else
                 StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
-        }       
+        }
     }
+
+    // enqueue a playback and ensure single queue processor runs
+    void EnqueuePlayback(string filePath, Transform origin)
+    {
+        Debug.Log("Enqueuing TTS playback: " + filePath);
+        playQueue.Enqueue(new PlayRequest { filePath = filePath, origin = origin });
+        if (!queueProcessorRunning)
+        {
+            queueProcessorRunning = true;
+            StartCoroutine(ProcessPlaybackQueue());
+        }
+    }
+
+    IEnumerator ProcessPlaybackQueue()
+    {
+        // process until queue empty
+        while (playQueue.Count > 0)
+        {
+            PlayRequest req = playQueue.Dequeue();
+            // PlayLocalAudioClip now yields until the clip playback finishes
+            yield return StartCoroutine(PlayLocalAudioClip(req.filePath, req.origin));
+            // wait 1s after the ongoing audio has ended before next
+            yield return new WaitForSeconds(0.5f);
+        }
+
+        queueProcessorRunning = false;
+    }
+
+    //nhận 1 global slot, chỉ 2 slot đồng thời
+    IEnumerator AcquireRequestSlot()
+    {
+        while (true)
+        {
+            int prev = Interlocked.Increment(ref concurrentRequests);
+            if (prev <= maxConcurrentRequests)
+                yield break; // slot acquired
+
+            Interlocked.Decrement(ref concurrentRequests); // rollback
+            yield return null; // wait a frame then retry
+        }
+    }
+
+    void ReleaseRequestSlot()
+    {
+        Interlocked.Decrement(ref concurrentRequests);
+        if (concurrentRequests < 0) concurrentRequests = 0;
+    }
+
+    // tạo speech mới thông qua api và upload lên be-vrealty
     IEnumerator GenerateSpeech(string text, string voiceId, Voices.Emotion emotion)
     {
         var req = new TTSRequest
@@ -60,125 +111,75 @@ public class TextToSpeech : MonoBehaviour
             transcript = text,
             voice = new Voice { mode = "id", id = voiceId },
             language = "vi",
-            generation_config = new GenerationConfig { volume = 1, speed = 1, emotion = emotion.ToString().ToLower() },
-            output_format = new OutputFormat { container = "mp3", encoding = "", sample_rate = 44100, bit_rate = 128000 },
+            generation_config = new GenerationConfig { volume = 2, speed = 1, emotion = emotion.ToString().ToLower() },
+            output_format = new OutputFormat { container = "wav", encoding = "pcm_s16le", sample_rate = 44100, bit_rate = 128000 },
             save = true
         };
         string json = JsonUtility.ToJson(req);
         byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
         string beRequestUrl = beApiUrl + "tts-bytes";
-        using (UnityWebRequest www = new UnityWebRequest(beRequestUrl, "POST"))
+        // wait for an available global slot
+        yield return StartCoroutine(AcquireRequestSlot());
+        try
         {
-            www.uploadHandler = new UploadHandlerRaw(jsonBytes);
-            www.downloadHandler = new DownloadHandlerBuffer();
-            www.SetRequestHeader("Content-Type", "application/json");
-            www.SetRequestHeader("Accept", "audio/mpeg");
-
-            yield return www.SendWebRequest();
-
-            if (www.result == UnityWebRequest.Result.Success)
+            using (UnityWebRequest www = new UnityWebRequest(beRequestUrl, "POST"))
             {
-                byte[] audioData = www.downloadHandler.data;
-                // Create a unique filename using voice ID and initials of text (max 30 chars)
-                string fileName = GetKey(text, emotion);
-                // Upload to be-vrealty
-                WWWForm form = new WWWForm();
-                form.AddBinaryData("file", audioData, fileName, "audio/mpeg");
-                Debug.Log("File name: " + fileName);
-                string bePostUrl = beApiUrl + "upload-audio/";
-                using (UnityWebRequest uploadRequest = UnityWebRequest.Post(bePostUrl, form))
+                www.uploadHandler = new UploadHandlerRaw(jsonBytes);
+                www.downloadHandler = new DownloadHandlerBuffer();
+                www.SetRequestHeader("Content-Type", "application/json");
+                www.SetRequestHeader("Accept", "audio/wav");
+
+                yield return www.SendWebRequest();
+
+                if (www.result == UnityWebRequest.Result.Success)
                 {
-                    yield return uploadRequest.SendWebRequest();
-                    if (uploadRequest.result == UnityWebRequest.Result.Success)
+                    byte[] audioData = www.downloadHandler.data;
+                    // Create a unique filename using voice ID and initials of text (max 30 chars)
+                    string fileName = GetKey(text, emotion);
+                    // Upload to be-vrealty
+                    WWWForm form = new WWWForm();
+                    form.AddBinaryData("file", audioData, fileName, "audio/wav");
+                    // Debug.Log("File name: " + fileName);
+                    string bePostUrl = beApiUrl + "upload-audio/";
+                    using (UnityWebRequest uploadRequest = UnityWebRequest.Post(bePostUrl, form))
                     {
-                        Debug.Log("Audio uploaded successfully to be-vrealty");
-                        // Parse the response to get the key (expects { "key": "..." })
-                        TTSResponse response = JsonUtility.FromJson<TTSResponse>(uploadRequest.downloadHandler.text);
-                        if (response == null || string.IsNullOrEmpty(response.result.key))
+                        yield return uploadRequest.SendWebRequest();
+                        if (uploadRequest.result == UnityWebRequest.Result.Success)
                         {
-                            Debug.LogError("Invalid upload response or missing key: " + uploadRequest.downloadHandler.text);
-                            yield break;
+                            Debug.Log("Audio uploaded successfully to be-vrealty");
+                            // Parse the response to get the key (expects { "key": "..." })
+                            TTSResponse response = JsonUtility.FromJson<TTSResponse>(uploadRequest.downloadHandler.text);
+                            if (response == null || string.IsNullOrEmpty(response.result.key))
+                            {
+                                Debug.LogError("Invalid upload response or missing key: " + uploadRequest.downloadHandler.text);
+                                yield break;
+                            }
+                            key = response.result.key;
+                            StartCoroutine(GetSpeechFromS3(text, voiceId, emotion));
                         }
-                        key = response.result.key;
-                        StartCoroutine(GetSpeechFromS3(text, voiceId, emotion));
-                    }
-                    else
-                    {
-                        Debug.LogError("Upload to be-vrealty failed: " + uploadRequest.error);
+                        else
+                        {
+                            Debug.LogError("Upload to be-vrealty failed: " + uploadRequest.error);
+                        }
                     }
                 }
-            }
-            else
-            {
-                Debug.LogError("Cartesia TTS request failed: " + www.error);
+                else
+                {
+                    Debug.LogError("Cartesia TTS request failed: " + www.error);
+                }
             }
         }
+        finally
+        {
+            ReleaseRequestSlot();
+        }
     }
-    // IEnumerator GenerateSpeech(string text, string voiceId)
-    // {
-    //     string url = $"https://api.elevenlabs.io/v1/text-to-speech/{voiceId}";
-    //     TTSRequest ttsRequest = new TTSRequest
-    //     {
-    //         text = text,
-    //         model_id = "eleven_flash_v2_5"
-    //     };
 
-    //     var jsonBody = JsonUtility.ToJson(ttsRequest, true);
-    //     byte[] bodyRaw = Encoding.UTF8.GetBytes(jsonBody);
-
-    //     using (UnityWebRequest www = new UnityWebRequest(url, "POST"))
-    //     {
-    //         www.uploadHandler = new UploadHandlerRaw(bodyRaw);
-    //         www.downloadHandler = new DownloadHandlerBuffer();
-    //         www.SetRequestHeader("xi-api-key", apiKey);
-    //         www.SetRequestHeader("Content-Type", "application/json");
-    //         www.SetRequestHeader("Accept", "audio/mpeg");
-
-    //         yield return www.SendWebRequest();
-    //         if (www.result == UnityWebRequest.Result.Success)
-    //         {
-    //             byte[] audioData = www.downloadHandler.data;
-    //             // Create a unique filename using voice ID and initials of text (max 20 chars)
-    //             string fileName = $"tts/{Voices.GetInitials(text)}_{Voices.VoiceId[voiceOption]}.mp3";
-    //             // Upload to be-vrealty
-    //             WWWForm form = new WWWForm();
-    //             form.AddBinaryData("file", audioData, fileName, "audio/mpeg");
-    //             Debug.Log("File name: " + fileName);
-    //             using (UnityWebRequest uploadRequest = UnityWebRequest.Post(beApiUrl + "upload-audio/", form))
-    //             {
-    //                 yield return uploadRequest.SendWebRequest();
-    //                 if (uploadRequest.result == UnityWebRequest.Result.Success)
-    //                 {
-    //                     Debug.Log("Audio uploaded successfully to be-vrealty");
-    //                     // Parse the response to get the key (expects { "key": "..." })
-    //                     TTSResponse response = JsonUtility.FromJson<TTSResponse>(uploadRequest.downloadHandler.text);
-    //                     if (response == null || string.IsNullOrEmpty(response.result.key))
-    //                     {
-    //                         Debug.LogError("Invalid upload response or missing key: " + uploadRequest.downloadHandler.text);
-    //                         yield break;
-    //                     }
-    //                     key = response.result.key;
-    //                     StartCoroutine(GetSpeechFromS3(text, voiceId));
-    //                 }
-    //                 else
-    //                 {
-    //                     Debug.LogError("Upload to be-vrealty failed: " + uploadRequest.error);
-    //                 }
-    //             }
-    //         }
-    //         else
-    //         {
-    //             Debug.LogError("ElevenLabs TTS request failed: " + www.error);
-    //         }
-    //     }
-    // }
-    // string GetKey(string text, string voiceId) => "tts/" + Voices.GetInitials(text) + "_" + voiceId + ".mp3";
-
-
+    // tải audio từ be-vrealty s3 về nếu có
     IEnumerator GetSpeechFromS3(string text, string voiceId, Voices.Emotion emotion)
     {
         string key = GetKey(text, emotion);
-        Debug.Log("Using generated key to download audio: " + key);
+        // Debug.Log("Using generated key to download audio: " + key);
         string clipUrl = beApiUrl + "clip?sourceOrKey=" + UnityWebRequest.EscapeURL(key);
 
         using (UnityWebRequest downloadClip = UnityWebRequest.Get(clipUrl))
@@ -190,52 +191,116 @@ public class TextToSpeech : MonoBehaviour
             {
                 byte[] clipData = downloadClip.downloadHandler.data;
                 // Save to platform default persistent path
-                string fileName = $"{Voices.GetInitials(text)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.mp3";
+                string fileName = $"{Voices.GetInitials(text)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.wav";
                 string filePath = Path.Combine(Application.persistentDataPath, fileName);
+                if (!File.Exists(filePath))
+                {
+                    //create path if not exist
+                    string directory = Path.GetDirectoryName(filePath);
+                    if (!Directory.Exists(directory))
+                    {
+                        Directory.CreateDirectory(directory);
+                    }
+                }
                 try
                 {
                     File.WriteAllBytes(filePath, clipData);
                     Debug.Log($"Saved TTS clip to: {filePath}");
+                    //if this obj collides with player while just created, play it
+                    if (!hasPlayed && this.GetComponent<Collider>().bounds.Intersects(GameObject.FindGameObjectWithTag("Player").GetComponent<Collider>().bounds))
+                        EnqueuePlayback(filePath, this.transform);
                 }
                 catch (Exception e)
                 {
                     Debug.LogError("Failed to write audio file: " + e.Message);
                     yield break;
                 }
-                StartCoroutine(PlayLocalAudioClip(filePath));
+                // enqueue playback so it respects queue
+                // EnqueuePlayback(filePath, this.transform);
             }
             else
             {
-                Debug.LogWarning("Failed to download clip from be-vrealty: " + downloadClip.error);
+                Debug.Log("Audio clip not found on S3, generating new clip...");
                 //thường là 404, nếu sai thì tạo mới
                 StartCoroutine(GenerateSpeech(text, voiceId, emotion));
             }
         }
     }
-    IEnumerator PlayLocalAudioClip(string filePath)
-    {
-        string fileUri = new System.Uri(filePath).AbsoluteUri;
-        using (var audioRequest = UnityWebRequestMultimedia.GetAudioClip(fileUri, AudioType.MPEG))
-        {
-            yield return audioRequest.SendWebRequest();
+    // IEnumerator PlayLocalAudioClip(string filePath, Transform origin)
+    // {
+    //     string fileUri = new System.Uri(filePath).AbsoluteUri;
+    //     using (var audioRequest = UnityWebRequestMultimedia.GetAudioClip(fileUri, AudioType.MPEG))
+    //     {
+    //         yield return audioRequest.SendWebRequest();
 
-            if (audioRequest.result == UnityWebRequest.Result.Success)
-            {
-                AudioClip audioClip = DownloadHandlerAudioClip.GetContent(audioRequest);
-                audioSource.clip = audioClip;
-                audioSource.Play();
-                Debug.Log("Playing TTS audio from local file.");
-            }
-            else
-            {
-                Debug.LogError("Failed to load local audio file: " + audioRequest.error);
-            }
+    //         if (audioRequest.result == UnityWebRequest.Result.Success)
+    //         {
+    //             AudioClip audioClip = DownloadHandlerAudioClip.GetContent(audioRequest);
+    //             SFXManager.instance.PlaySFXClip(audioClip, origin, 2.0f);
+    //             Debug.Log("Playing TTS audio from local file: " + filePath);
+    //             // yield until clip finished
+    //             if (audioClip != null && audioClip.length > 0f)
+    //                 yield return new WaitForSeconds(audioClip.length);
+    //             else
+    //                 yield return null;
+    //         }
+    //         else
+    //         {
+    //             Debug.LogError("Failed to load local audio file: " + audioRequest.error);
+    //         }
+    //     }
+    // }
+    IEnumerator PlayLocalAudioClip(string filePath, Transform origin)
+    {
+#if UNITY_WEBGL
+        // 1. Read bytes from IDBFS file
+        byte[] audioBytes = File.ReadAllBytes(filePath);
+        if (audioBytes == null || audioBytes.Length == 0)
+        {
+            Debug.LogError("Failed to read local audio bytes: " + filePath);
+            yield break;
+        }
+
+        // 2. Convert bytes → AudioClip
+        AudioClip audioClip = WavUtility.ToAudioClip(audioBytes, 0, Path.GetFileNameWithoutExtension(filePath));
+        if (audioClip == null)
+        {
+            Debug.LogError("Failed to parse AudioClip from bytes");
+            yield break;
+        }
+
+        // 3. Play SFX
+        SFXManager.instance.PlaySFXClip(audioClip, origin, 2.0f);
+
+        hasPlayed = true;
+
+        // 4. Wait until finished
+        yield return new WaitForSeconds(audioClip.length);
+#else
+    // --------- Non-WebGL (Windows, Mac, Editor) ---------
+    string fileUri = new System.Uri(filePath).AbsoluteUri;
+    using (var audioRequest = UnityWebRequestMultimedia.GetAudioClip(fileUri, AudioType.WAV))
+    {
+        yield return audioRequest.SendWebRequest();
+
+        if (audioRequest.result == UnityWebRequest.Result.Success)
+        {
+            AudioClip audioClip = DownloadHandlerAudioClip.GetContent(audioRequest);
+            SFXManager.instance.PlaySFXClip(audioClip, origin, 2.0f);
+
+            hasPlayed = true;
+
+            if (audioClip != null && audioClip.length > 0f)
+                yield return new WaitForSeconds(audioClip.length);
+        }
+        else
+        {
+            Debug.LogError("Failed to load local audio file: " + audioRequest.error);
         }
     }
-
-    string GetKey(string text, Voices.Emotion emotion) => $"tts/{Voices.GetInitials(text)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.mp3";
-
-
+#endif
+    }
 
 
+    string GetKey(string text, Voices.Emotion emotion) => $"tts/{Voices.GetInitials(text)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.wav";
 }

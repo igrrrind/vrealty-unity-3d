@@ -87,7 +87,7 @@ public class PlayerMovement : MonoBehaviour
     private IEnumerator GroundEffect()
     {
         isSoundCoroutineRunning = true;
-        soundCoroutineFreq = isRunning ? 3f : 2f;
+        soundCoroutineFreq = isRunning ? 1f * runSpeed : 1f * walkSpeed;
         PlayRandomSFXClip(walkSoundClips);
         yield return new WaitForSeconds(1f / soundCoroutineFreq);
         isSoundCoroutineRunning = false;
