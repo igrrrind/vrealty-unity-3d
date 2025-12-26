@@ -1,7 +1,9 @@
 using System.Collections;
 using UnityEngine;
+using Unity.Netcode;
+using Unity.Cinemachine;
 
-public class PlayerMovement : MonoBehaviour
+public class PlayerMovement : NetworkBehaviour
 {
     // Start is called once before the first execution of Update after the MonoBehaviour is created
     private Rigidbody rb;
@@ -29,9 +31,23 @@ public class PlayerMovement : MonoBehaviour
         rb = GetComponent<Rigidbody>();
     }
 
+    public override void OnNetworkSpawn()
+    {
+        base.OnNetworkSpawn();
+        
+        // Disable physics for non-local players (NetworkTransform will sync their position)
+        if (!IsOwner)
+        {
+            rb.isKinematic = true;
+        }
+    }
+
     // Update is called once per frame
     void Update()
     {
+        // Only handle input and physics for local player (or if not networked)
+        if (IsSpawned && !IsOwner) return;
+        
         cameraPos.localPosition = new Vector3(cameraPos.localPosition.x, height - 1, cameraPos.localPosition.z);
         MyInput();
         SpeedControl();
@@ -43,6 +59,8 @@ public class PlayerMovement : MonoBehaviour
 
     void FixedUpdate()
     {
+        // Only move local player (or if not networked)
+        if (IsSpawned && !IsOwner) return;
         MovePlayer(); 
     }
     private void MyInput()
@@ -57,6 +75,7 @@ public class PlayerMovement : MonoBehaviour
     private void MovePlayer()
     {
         moveDirection = orientation.forward * y + orientation.right * x;
+        // Debug.Log("Direction: " + moveDirection.normalized + "Key Input: " + x + ", " + y);
         rb.AddForce(moveDirection.normalized * speed * 10f, ForceMode.Force);
         if (rb.linearVelocity != Vector3.zero && !isSoundCoroutineRunning) 
         {
@@ -86,6 +105,13 @@ public class PlayerMovement : MonoBehaviour
     }
     private IEnumerator GroundEffect()
     {
+        // Only play footstep sounds for local player
+        if (!IsOwner)
+        {
+            isSoundCoroutineRunning = false;
+            yield break;
+        }
+        
         isSoundCoroutineRunning = true;
         soundCoroutineFreq = isRunning ? 1f * runSpeed : 1f * walkSpeed;
         PlayRandomSFXClip(walkSoundClips);

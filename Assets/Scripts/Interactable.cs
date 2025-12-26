@@ -1,8 +1,9 @@
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
+using Unity.Netcode;
 
-public class Interactable : MonoBehaviour
+public class Interactable : NetworkBehaviour
 {
     private Outline outline;
     public string message;

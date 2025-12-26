@@ -50,11 +50,7 @@ public class TextToSpeech : MonoBehaviour
         // Fetch property TTS audios and match with object name to set idBackEnd
         if (!string.IsNullOrEmpty(propId))
         {
-            StartCoroutine(FetchPropertyTtsAudios(propId));
-        }
-        else if (!string.IsNullOrEmpty(idBackEnd))
-        {
-            StartCoroutine(FetchTranscriptFromBackend(idBackEnd));
+            StartCoroutine(FetchTranscriptByPropertyAndName(propId));
         }
         else
         {
@@ -64,108 +60,121 @@ public class TextToSpeech : MonoBehaviour
     // kích hoạt khi player chạm vào vùng trigger, khi kích hoạt, ktra xem file đã có chưa, nếu có thì play luôn, nếu chưa thì tạo mới
     private void OnTriggerEnter(Collider other)
     {
-        if (hasPlayed) return;
-        if (other.gameObject.CompareTag("Player"))
+        // Check if already played OR not a player
+        if (hasPlayed || !other.CompareTag("Player")) return;
+        
+        // Mark as played immediately to prevent multiple triggers
+        hasPlayed = true;
+        
+        string localPath = GetLocalFilePath();
+        if (File.Exists(localPath))
         {
-            key = $"{Voices.GetInitials(transcript)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.wav";
-            string localPath = Path.Combine(Application.persistentDataPath, key);
-            if (File.Exists(localPath))
-            {
-                EnqueuePlayback(localPath, this.transform);
-            }
-            else
-                StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
+            EnqueuePlayback(localPath, this.transform);
+        }
+        else
+        {
+            StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
         }
     }
 
-    // Fetch all TTS audios for a property and match with object name
-    IEnumerator FetchPropertyTtsAudios(string propId)
+    // Helper method to fallback to local transcript
+    // COMMENTED OUT - Can be reverted if needed
+    // void FallbackToLocalTranscript(string reason)
+    // {
+    //     if (!string.IsNullOrEmpty(reason))
+    //         Debug.LogWarning(reason);
+    //     StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
+    // }
+
+    // Fetch transcript by property ID and object name
+    IEnumerator FetchTranscriptByPropertyAndName(string propId)
     {
         string url = $"{beApiUrl}property/{propId}";
         
         using (UnityWebRequest request = UnityWebRequest.Get(url))
         {
             request.SetRequestHeader("Accept", "application/json");
-            
             yield return request.SendWebRequest();
             
-            if (request.result == UnityWebRequest.Result.Success)
+            if (request.result != UnityWebRequest.Result.Success)
             {
-                string jsonResponse = request.downloadHandler.text;
-                var wrapperResponse = JsonUtility.FromJson<TTSResponse>(jsonResponse);
-                
-                if (wrapperResponse != null && wrapperResponse.isSuccess)
-                {
-                    // Extract the result array
-                    int resultStart = jsonResponse.IndexOf("\"result\":");
-                    if (resultStart > 0)
-                    {
-                        resultStart = jsonResponse.IndexOf("[", resultStart);
-                        int resultEnd = jsonResponse.LastIndexOf("]");
-                        
-                        if (resultStart > 0 && resultEnd > resultStart)
-                        {
-                            string arrayJson = jsonResponse.Substring(resultStart + 1, resultEnd - resultStart - 1);
-                            
-                            // Split array items and parse each one
-                            string objectName = gameObject.name.Trim();
-                            bool foundMatch = false;
-                            
-                            // Simple split by "},{" to get individual objects
-                            string[] items = arrayJson.Split(new string[] { "},{" }, StringSplitOptions.None);
-                            
-                            foreach (string item in items)
-                            {
-                                string jsonItem = item.StartsWith("{") ? item : "{" + item;
-                                jsonItem = jsonItem.EndsWith("}") ? jsonItem : jsonItem + "}";
-                                
-                                TtsAudioDbResponse audioData = JsonUtility.FromJson<TtsAudioDbResponse>(jsonItem);
-                                
-                                if (audioData != null && !string.IsNullOrEmpty(audioData.name))
-                                {
-                                    // Match object name with TTS audio name (case-insensitive)
-                                    if (audioData.name.Trim().Equals(objectName, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        idBackEnd = audioData.id;
-                                        foundMatch = true;
-                                        Debug.Log($"Matched object '{objectName}' with TTS Audio ID: {idBackEnd}");
-                                        
-                                        // Fetch transcript using the matched ID
-                                        StartCoroutine(FetchTranscriptFromBackend(idBackEnd));
-                                        break;
-                                    }
-                                }
-                            }
-                            
-                            if (!foundMatch)
-                            {
-                                Debug.LogWarning($"No TTS Audio match found for object name: {objectName}. Using local transcript.");
-                                StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
-                            }
-                        }
-                        else
-                        {
-                            Debug.LogError("Failed to extract result array from response");
-                            StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
-                        }
-                    }
-                    else
-                    {
-                        Debug.LogError("No result field found in response");
-                        StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
-                    }
-                }
-                else
-                {
-                    Debug.LogError("Failed to fetch property TTS audios: " + (wrapperResponse != null ? wrapperResponse.message : "Invalid response"));
-                    StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
-                }
-            }
-            else
-            {
+                // COMMENTED OUT FALLBACK - Can be reverted if needed
+                // FallbackToLocalTranscript($"Failed to fetch property TTS audios: {request.error}");
                 Debug.LogError($"Failed to fetch property TTS audios: {request.error}");
-                StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
+                yield break;
             }
+
+            string jsonResponse = request.downloadHandler.text;
+            var wrapperResponse = JsonUtility.FromJson<TTSResponse>(jsonResponse);
+            
+            if (wrapperResponse == null || !wrapperResponse.isSuccess)
+            {
+                // COMMENTED OUT FALLBACK - Can be reverted if needed
+                // FallbackToLocalTranscript("Failed to fetch property TTS audios: " + (wrapperResponse != null ? wrapperResponse.message : "Invalid response"));
+                Debug.LogError("Failed to fetch property TTS audios: " + (wrapperResponse != null ? wrapperResponse.message : "Invalid response"));
+                yield break;
+            }
+
+            // Extract the result array
+            int resultStart = jsonResponse.IndexOf("\"result\":[");
+            if (resultStart < 0)
+            {
+                // COMMENTED OUT FALLBACK - Can be reverted if needed
+                // FallbackToLocalTranscript("No result field found in response");
+                Debug.LogError("No result field found in response");
+                yield break;
+            }
+
+            resultStart = jsonResponse.IndexOf("[", resultStart);
+            int resultEnd = jsonResponse.LastIndexOf("]");
+            
+            if (resultStart < 0 || resultEnd <= resultStart)
+            {
+                // COMMENTED OUT FALLBACK - Can be reverted if needed
+                // FallbackToLocalTranscript("Failed to extract result array from response");
+                Debug.LogError("Failed to extract result array from response");
+                yield break;
+            }
+
+            string arrayJson = jsonResponse.Substring(resultStart + 1, resultEnd - resultStart - 1);
+            string objectName = gameObject.name.Trim();
+            
+            // Simple split by "},{" to get individual objects
+            string[] items = arrayJson.Split(new string[] { "},{" }, StringSplitOptions.None);
+            
+            foreach (string item in items)
+            {
+                string jsonItem = item.StartsWith("{") ? item : "{" + item;
+                jsonItem = jsonItem.EndsWith("}") ? jsonItem : jsonItem + "}";
+                
+                TtsAudioDbResponse audioData = JsonUtility.FromJson<TtsAudioDbResponse>(jsonItem);
+                
+                if (audioData != null && !string.IsNullOrEmpty(audioData.name) &&
+                    audioData.name.Trim().Equals(objectName, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Found match, use data directly
+                    idBackEnd = audioData.id;
+                    transcript = audioData.transcript;
+                    
+                    // Parse voice option and emotion from response
+                    if (System.Enum.TryParse(audioData.voiceId, true, out Voices.VoiceOption parsedVoice))
+                        voiceOption = parsedVoice;
+
+                    if (System.Enum.TryParse(audioData.emotion, true, out Voices.Emotion parsedEmotion))
+                        emotion = parsedEmotion;
+                    
+                    Debug.Log($"Matched object '{objectName}' - Transcript: {transcript}");
+                    
+                    // Start TTS workflow with fetched data
+                    StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
+                    yield break;
+                }
+            }
+            
+            // No match found
+            // COMMENTED OUT FALLBACK - Can be reverted if needed
+            // FallbackToLocalTranscript($"No TTS Audio match found for object name: {objectName}. Using local transcript.");
+            Debug.LogError($"No TTS Audio match found for object name: {objectName}");
         }
     }
 
@@ -214,80 +223,6 @@ public class TextToSpeech : MonoBehaviour
     {
         Interlocked.Decrement(ref concurrentRequests);
         if (concurrentRequests < 0) concurrentRequests = 0;
-    }
-
-    public IEnumerator FetchTranscriptFromBackend(string id)
-    {
-        string url = $"{beApiUrl}{id}";
-
-        using (UnityWebRequest request = UnityWebRequest.Get(url))
-        {
-            request.SetRequestHeader("Accept", "application/json");
-
-            yield return request.SendWebRequest();
-
-            if (request.result == UnityWebRequest.Result.Success)
-            {
-                string jsonResponse = request.downloadHandler.text;
-
-                // Parse wrapper response first
-                var wrapperResponse = JsonUtility.FromJson<TTSResponse>(jsonResponse);
-
-                if (wrapperResponse != null && wrapperResponse.isSuccess)
-                {
-                    // Extract and parse the nested result object
-                    int resultStart = jsonResponse.IndexOf("\"result\":");
-                    if (resultStart > 0)
-                    {
-                        resultStart = jsonResponse.IndexOf("{", resultStart);
-                        int resultEnd = jsonResponse.LastIndexOf("}");
-
-                        if (resultStart > 0 && resultEnd > resultStart)
-                        {
-                            string resultJson = jsonResponse.Substring(resultStart, resultEnd - resultStart);
-                            TtsAudioDbResponse fetchResult = JsonUtility.FromJson<TtsAudioDbResponse>(resultJson);
-
-                            if (fetchResult != null && !string.IsNullOrEmpty(fetchResult.transcript))
-                            {
-                                transcript = fetchResult.transcript;
-
-                                // Parse voice option and emotion from response
-                                if (System.Enum.TryParse(fetchResult.voiceId, true, out Voices.VoiceOption parsedVoice))
-                                    voiceOption = parsedVoice;
-
-                                if (System.Enum.TryParse(fetchResult.emotion, true, out Voices.Emotion parsedEmotion))
-                                    emotion = parsedEmotion;
-
-                                Debug.Log($"Fetched transcript from backend: {transcript}");
-
-                                // Start TTS workflow with fetched data
-                                StartCoroutine(GetSpeechFromS3(transcript, Voices.VoiceId[voiceOption], emotion));
-                            }
-                            else
-                            {
-                                Debug.LogError("Invalid result data or empty transcript");
-                            }
-                        }
-                        else
-                        {
-                            Debug.LogError("Failed to extract result from response");
-                        }
-                    }
-                    else
-                    {
-                        Debug.LogError("No result field found in response");
-                    }
-                }
-                else
-                {
-                    Debug.LogError("Failed to fetch transcript: " + (wrapperResponse != null ? wrapperResponse.message : "Invalid response"));
-                }
-            }
-            else
-            {
-                Debug.LogError($"Failed to fetch transcript from backend: {request.error}");
-            }
-        }
     }
 
     // tạo speech mới thông qua api và upload lên be-vrealty
@@ -380,7 +315,6 @@ public class TextToSpeech : MonoBehaviour
     IEnumerator GetSpeechFromS3(string text, string voiceId, Voices.Emotion emotion)
     {
         string key = GetKey(text, emotion);
-        // Debug.Log("Using generated key to download audio: " + key);
         string clipUrl = beApiUrl + "clip?sourceOrKey=" + UnityWebRequest.EscapeURL(key);
 
         using (UnityWebRequest downloadClip = UnityWebRequest.Get(clipUrl))
@@ -390,39 +324,45 @@ public class TextToSpeech : MonoBehaviour
 
             if (downloadClip.result == UnityWebRequest.Result.Success)
             {
-                byte[] clipData = downloadClip.downloadHandler.data;
-                // Save to platform default persistent path
-                string fileName = $"{Voices.GetInitials(text)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.wav";
-                string filePath = Path.Combine(Application.persistentDataPath, fileName);
-                if (!File.Exists(filePath))
+                string filePath = GetLocalFilePath();
+                
+                // Create directory if not exists
+                string directory = Path.GetDirectoryName(filePath);
+                if (!Directory.Exists(directory))
                 {
-                    //create path if not exist
-                    string directory = Path.GetDirectoryName(filePath);
-                    if (!Directory.Exists(directory))
-                    {
-                        Directory.CreateDirectory(directory);
-                    }
+                    Directory.CreateDirectory(directory);
                 }
+                
                 try
                 {
-                    File.WriteAllBytes(filePath, clipData);
+                    File.WriteAllBytes(filePath, downloadClip.downloadHandler.data);
                     Debug.Log($"Saved TTS clip to: {filePath}");
-                    //if this obj collides with player while just created, play it
-                    if (!hasPlayed && this.GetComponent<Collider>().bounds.Intersects(GameObject.FindGameObjectWithTag("Player").GetComponent<Collider>().bounds))
-                        EnqueuePlayback(filePath, this.transform);
+                    
+                    // If this obj collides with player while just created, play it
+                    if (!hasPlayed)
+                    {
+                        var playerObj = GameObject.FindGameObjectWithTag("Player");
+                        if (playerObj != null)
+                        {
+                            var thisCollider = GetComponent<Collider>();
+                            var playerCollider = playerObj.GetComponent<Collider>();
+                            if (thisCollider != null && playerCollider != null && 
+                                thisCollider.bounds.Intersects(playerCollider.bounds))
+                            {
+                                hasPlayed = true; // Mark as played before enqueueing
+                                EnqueuePlayback(filePath, this.transform);
+                            }
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
                     Debug.LogError("Failed to write audio file: " + e.Message);
-                    yield break;
                 }
-                // enqueue playback so it respects queue
-                // EnqueuePlayback(filePath, this.transform);
             }
             else
             {
                 Debug.Log("Audio clip not found on S3, generating new clip...");
-                //thường là 404, nếu sai thì tạo mới
                 StartCoroutine(GenerateSpeech(text, voiceId, emotion));
             }
         }
@@ -504,4 +444,10 @@ public class TextToSpeech : MonoBehaviour
 
 
     string GetKey(string text, Voices.Emotion emotion) => $"tts/{Voices.GetInitials(text)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.wav";
+    
+    string GetLocalFilePath()
+    {
+        string fileName = $"{Voices.GetInitials(transcript)}_{Voices.NonUnicode(voiceOption.ToString().ToLower())}_{emotion.ToString().ToLower()}.wav";
+        return Path.Combine(Application.persistentDataPath, fileName);
+    }
 }

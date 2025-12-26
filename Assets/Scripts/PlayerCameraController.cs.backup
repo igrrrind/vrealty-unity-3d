@@ -1,0 +1,252 @@
+using UnityEngine;
+using Unity.Netcode;
+
+public class PlayerCameraController : NetworkBehaviour
+{
+    [Header("Camera Settings")]
+    [SerializeField] private float mouseSensitivity = 2f;
+    [SerializeField] private float minVerticalAngle = -80f;
+    [SerializeField] private float maxVerticalAngle = 80f;
+    
+    [Header("References")]
+    public Transform orientation;
+    public Transform cameraPos; // Use existing Camera Pos from hierarchy
+    
+    private float xRotation = 0f;
+    private float yRotation = 0f;
+    private Camera mainCamera;
+
+    public override void OnNetworkSpawn()
+    {
+        base.OnNetworkSpawn();
+        
+        if (IsOwner)
+        {
+            SetupLocalPlayerCamera();
+        }
+    }
+
+    private void SetupLocalPlayerCamera()
+    {
+        Debug.Log("[Camera] Starting camera setup for local player...");
+        
+        // Find camera pos in children if not assigned
+        if (cameraPos == null)
+        {
+            cameraPos = transform.Find("Camera Pos");
+            if (cameraPos == null)
+            {
+                Debug.LogError("[CameMANUAL camera setup for local player...");
+        
+        // Find camera pos in children if not assigned
+        if (cameraPos == null)
+        {
+            cameraPos = transform.Find("Camera Pos");
+            if (cameraPos == null)
+            {
+                Debug.LogError("[Camera] Camera Pos not found in Player hierarchy!");
+                return;
+            }
+            Debug.Log($"[Camera] Found Camera Pos at position: {cameraPos.position}");
+        }
+        
+        // Find orientation if not assigned
+        if (orientation == null)
+        {
+            orientation = transform.Find("Orientation");
+            if (orientation == null)
+            {
+                Debug.LogWarning("[Camera] Orientation not found, using player transform for rotation.");
+                orientation = transform;
+            }
+            else
+            {
+                Debug.Log("[Camera] Found Orientation transform");
+            }
+        }
+        
+        // Find Main Camera and unparent it
+        mainCamera = Camera.main;
+        if (mainCamera == null)
+        {
+            Debug.LogError("[Camera] Main Camera not found! Make sure there's a camera with MainCamera tag.");
+            return;
+        }
+        
+        Debug.Log($"[Camera] Found Main Camera at position: {mainCamera.transform.position}");
+        
+        // Unparent Main Camera so we can control it directly
+        if (mainCamera.transform.parent != null)
+        {
+            Debug.Log($"[Camera] Unparenting Main Camera from {mainCamera.transform.parent.name}");
+            mainCamera.transform.SetParent(null);
+        }
+        
+        Debug.Log("[Camera] ✓ Manual camera control setup complete!");
+        if (!IsOwner) return;
+        
+        HandleMouseLook();
+        
+        // Keep virtual camera enabled
+        if (virtualCamera != null && !virtualCamera.enabled)
+        {
+            Debug.LogWarning("[Camera] Virtual camera was disabled in Update! Re-enabling...");
+            virtualCamera.enabled = true;
+        }
+        
+        // Debug camera brain status every 3 seconds
+        if (Time.frameCount % 180 == 0 && virtualCamera != null)
+        {
+            Camera mainCam = Camera.main;
+            if (mainCam != null)
+            {
+                var brain = mainCam.GetComponent<CinemachineBrain>();
+                if (brain != null)
+                {
+                    bool isOurCameraActive = brain.ActiveVirtualCamera == virtualCamera;
+                    Debug.Log($"[Camera Update] Brain using OUR camera? {isOurCameraActive} | Brain Active: {brain.ActiveVirtualCamera?.Name ?? "None"} | Our Cam: {virtualCamera.name} (Priority: {virtualCamera.Priority.Value}) | Following: {virtualCamera.Follow?.name ?? "None"}");
+                    
+                    // If not active, try to force it
+                    if (!isOurCameraActive && virtualCamera.enabled)
+                    {
+                        Debug.LogWarning($"[Camera Update] Our camera not active! Boosting priority to 100...");
+                        virtualCamera.Priority.Value = 100;
+                    }
+                }
+            }
+        }
+    }
+
+    private void HandleMouseLook()
+    {
+        // Get mouse input
+        float mouseX = Input.GetAxis("Mouse X") * mouseSensitivity;
+        float mouseY = Input.GetAxis("Mouse Y") * mouseSensitivity;
+        
+        // Rotate camera up/down
+        xRotation -= mouseY;
+        xRotation = Mathf.Clamp(xRotation, minVerticalAngle, maxVerticalAngle);
+        
+        // Rotate player left/right
+        yRotation += mouseX;
+        
+        // Apply rotations
+        if (cameraPos != null)
+        {
+            cameraPos.localRotation = Quaternion.Euler(xRotation, 0f, 0f);
+        }
+        
+        if (orientation != null)
+        {
+            orientation.rotation = Quaternion.Euler(0f, yRotation, 0f);
+        }
+        
+        // Unlock cursor on ESC
+        if (Input.GetKeyDown(KeyCode.Escape))
+        {
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
+        }
+        
+        // Lock cursor on click
+        if (Input.GetMouseButtonDown(0))
+        {
+            Cursor.lockState = CursorLockMode.Locked;
+            Cursor.visible = false;
+        }
+    }
+    
+    private System.Collections.IEnumerator EnsureCameraEnabled()
+    {
+        // Wait a frame for all initialization to complete
+        yield return null;
+        
+        if (virtualCamera != null)
+        {
+            // Force disable then re-enable to trigger Awake/OnEnable
+            virtualCamera.enabled = false;
+            yield return null;
+            virtualCamera.enabled = true;
+            
+            // Wait for Cinemachine to update
+            yield return new WaitForSeconds(0.5f);
+            
+            // Check if Brain is using this camera
+            Camera mainCam = Camera.main;
+            if (mainCam != null)
+            {
+                var brain = mainCam.GetComponent<CinemachineBrain>();
+                if (brain != null)
+                {
+                    string activeCamName = brain.ActiveVirtualCamera?.Name ?? "None";
+                    bool isActive = brain.ActiveVirtualCamera == virtualCamera;
+                    
+                    Debug.Log($"[Camera] === CAMERA STATUS ===");
+                    Debug.Log($"[Camera] Brain Active Camera: {activeCamName}");
+                    Debug.Log($"[Camera] Our Camera Name: {virtualCamera.name}");
+                    Debug.Log($"[Camera] Is Our Camera Active? {isActive}");
+                    Debug.Log($"[Camera] Our Priority: {virtualCamera.Priority.Value}");
+                    Debug.Log($"[Camera] Follow Target: {virtualCamera.Follow?.name ?? "None"}");
+                    Debug.Log($"[Camera] LookAt Target: {virtualCamera.LookAt?.name ?? "None"}");
+                    
+                    if (!isActive)
+                    {
+                        Debug.LogError($"[Camera] Brain is NOT using our camera! Trying aggressive fixes...");
+                        
+                        // Find and disable ALL other virtual cameras
+                        var allCameras = FindObjectsByType<CinemachineCamera>(FindObjectsSortMode.None);
+                        {
+                            Debug.LogError($"[Camera] ✗✗✗ STILL FAILED! Brain active: {brain.ActiveVirtualCamera?.Name ?? "None"}");
+                            Debug.LogError($"[Camera] Trying to set Main Camera position manually as fallback...");
+                            
+                            // Fallback: directly control main camera
+                            StartCoroutine(ManualCameraFollow());
+                        }
+                    }
+                    else
+                    {
+                        Debug.Log($"[Camera] ✓✓✓ SUCCESS! Brain is using our camera and should be following player!");
+                    }
+                }
+                else
+                {
+                    Debug.LogError("[Camera] CinemachineBrain not found on Main Camera!");
+                }
+            }
+        }
+    }
+    
+    private bool useManualCameraFollow = false;
+    
+    private System.Collections.IEnumerator ManualCameraFollow()
+    {
+        Debug.LogWarning("[Camera] Starting MANUAL camera follow as fallback!");
+        useManualCameraFollow = true;
+        yield break;
+    }
+    
+    void LateUpdate()
+    {
+        if (!IsOwner || !useManualCameraFollow) return;
+        
+        // Manual camera follow if Cinemachine fails
+        Camera mainCam = Camera.main;
+        if (mainCam != null && cameraPos != null && orientation != null)
+        {
+            // Position follows camera pos
+            mainCam.transform.position = cameraPos.position;
+            
+            // Rotation combines orientation (horizontal) and camera pos (vertical)
+            // cameraPos has vertical rotation (pitch), orientation has horizontal rotation (yaw)
+            mainCam.transform.rotation = orientation.rotation * cameraPos.localRotation;
+        }
+    }
+    
+    private void OnDestroy()
+    {
+        if (IsOwner && virtualCamera != null)
+        {
+            Destroy(virtualCamera.gameObject);
+        }
+    }
+}

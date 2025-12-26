@@ -33,14 +33,16 @@ public class PauseMenu : MonoBehaviour
     }
     public void PauseGame()
     {
-
         pauseMenu.SetActive(true);
         exitConfirm.SetActive(false);
         optionsMenu.SetActive(false);
         _lowPass.cutoffFrequency = 300f;
         //Time.timeScale = 0f;
         isPaused = true;
-
+        
+        // Show and unlock cursor when paused
+        Cursor.lockState = CursorLockMode.None;
+        Cursor.visible = true;
     }
     public void ResumeGame()
     {
@@ -50,6 +52,10 @@ public class PauseMenu : MonoBehaviour
         _lowPass.cutoffFrequency = 22000f;
         //Time.timeScale = 1f;
         isPaused = false;
+        
+        // Hide and lock cursor when resumed
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible = false;
     }
     public void OpenOptions()
     {

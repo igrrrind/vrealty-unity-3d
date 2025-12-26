@@ -20,4 +20,5 @@ public class HUDController : MonoBehaviour
     {
         interactionText.gameObject.SetActive(false);
     }
+
 }

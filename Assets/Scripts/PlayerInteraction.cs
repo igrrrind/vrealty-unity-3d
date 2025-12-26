@@ -1,12 +1,23 @@
 using UnityEngine;
+using Unity.Netcode;
 
-public class PlayerInteraction : MonoBehaviour
+public class PlayerInteraction : NetworkBehaviour
 {
     public float reachLength = 3f;  
     public Interactable currentInteractable;
-    public Camera camera;
+    private Camera mainCamera;
+    
+    private void Start()
+    {
+        // Get main camera (Cinemachine will use this)
+        mainCamera = Camera.main;
+    }
+    
     void Update()
     {
+        // Only local player can interact
+        if (!IsOwner) return;
+        
         CheckInteraction();
         if (Input.GetKeyDown(KeyCode.F) && currentInteractable != null)
         {
@@ -16,8 +27,14 @@ public class PlayerInteraction : MonoBehaviour
 
     private void CheckInteraction()
     {
+        if (mainCamera == null)
+        {
+            mainCamera = Camera.main;
+            if (mainCamera == null) return;
+        }
+        
         RaycastHit hit;
-        Ray ray = new Ray(camera.transform.position, camera.transform.forward);
+        Ray ray = new Ray(mainCamera.transform.position, mainCamera.transform.forward);
         if (Physics.Raycast(ray, out hit, reachLength))
         {
             if (hit.collider.CompareTag("Interactable"))
